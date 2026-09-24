@@ -1,0 +1,42 @@
+# Dependencies / build
+node_modules/
+dist/
+dist-ssr/
+src-tauri/target/
+
+# Local signing secrets - NEVER commit
+.signing/
+
+# Logs / temporary files
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.local
+
+# Local Veyra test output
+/*.png
+download-test/
+profile-test/
+patch_*.py
+veyra-debug.log
+
+# Editors / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Local release output / overrides
+release/
+tauri.local.conf.json
+
+# Runtime-installed extensions (bundled Proton source lives in src-tauri/resources)
+extensions/
