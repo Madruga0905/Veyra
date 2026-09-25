@@ -1,9 +1,10 @@
 use tauri::{Emitter, Manager, WebviewUrl, webview::{DownloadEvent, NewWindowResponse, WebviewBuilder}, PhysicalPosition, PhysicalSize};
-use std::io::Write;
+use std::{collections::HashMap,io::Write,sync::{Arc,Mutex,OnceLock},sync::atomic::{AtomicBool,AtomicU64,Ordering}};
 use serde_json::json;
 use tauri_plugin_updater::UpdaterExt;
-#[cfg(windows)] use webview2_com::AcceleratorKeyPressedEventHandler;
-#[cfg(windows)] use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN};
+#[cfg(windows)] use webview2_com::{AcceleratorKeyPressedEventHandler,WebResourceRequestedEventHandler,take_pwstr};
+#[cfg(windows)] use webview2_com::Microsoft::Web::WebView2::Win32::{COREWEBVIEW2_KEY_EVENT_KIND_KEY_DOWN,COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN,COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL};
+#[cfg(windows)] use windows::core::{HSTRING,PWSTR};
 #[cfg(windows)] #[link(name="user32")] extern "system" { fn GetKeyState(n_virt_key:i32)->i16; }
 const TOP: u32 = 118;
 fn data_root()->std::path::PathBuf{let base=std::env::var("LOCALAPPDATA").unwrap_or_else(|_|std::env::temp_dir().to_string_lossy().to_string());std::path::PathBuf::from(base).join("Veyra")}
@@ -20,12 +21,25 @@ fn label(profile_id:&str,tab_id:u32)->String{format!("content-{}-{tab_id}",safe_
 fn profile_data_dir(profile_id:&str)->std::path::PathBuf{data_root().join("Profiles").join(safe_profile(profile_id))}
 fn each_content(app:&tauri::AppHandle)->Vec<tauri::Webview>{app.webviews().into_iter().filter(|(k,_)|k.starts_with("content-")).map(|(_,v)|v).collect()}
 fn profile_content(app:&tauri::AppHandle,profile_id:&str)->Vec<tauri::Webview>{let p=format!("content-{}-",safe_profile(profile_id));app.webviews().into_iter().filter(|(k,_)|k.starts_with(&p)).map(|(_,v)|v).collect()}
+struct AdblockState{enabled:AtomicBool,blocked:AtomicU64}
+static ADBLOCK_STATES:OnceLock<Mutex<HashMap<String,Arc<AdblockState>>>>=OnceLock::new();
+const AD_HOSTS:&[&str]=&["doubleclick.net","googlesyndication.com","googleadservices.com","googletagservices.com","amazon-adsystem.com","adnxs.com","rubiconproject.com","pubmatic.com","openx.net","casalemedia.com","criteo.com","criteo.net","adsrvr.org","taboola.com","outbrain.com","scorecardresearch.com","quantserve.com","moatads.com","media.net","smartadserver.com","sharethrough.com","bidswitch.net","lijit.com","bluekai.com","demdex.net","serving-sys.com","adsafeprotected.com","adform.net","yieldmo.com","zedo.com"];
+fn adblock_state(profile_id:&str)->Arc<AdblockState>{let m=ADBLOCK_STATES.get_or_init(||Mutex::new(HashMap::new()));let mut g=m.lock().unwrap_or_else(|e|e.into_inner());g.entry(safe_profile(profile_id)).or_insert_with(||Arc::new(AdblockState{enabled:AtomicBool::new(true),blocked:AtomicU64::new(0)})).clone()}
+fn should_block_url(url:&str)->bool{let Ok(u)=tauri::Url::parse(url)else{return false;};let Some(host)=u.host_str()else{return false;};let h=host.to_ascii_lowercase();AD_HOSTS.iter().any(|d|h==*d||h.ends_with(&format!(".{d}")))}
 fn hide_all(app:&tauri::AppHandle){for w in each_content(app){let _=w.hide();}}
 fn resize_content(app:&tauri::AppHandle){
  if let Some(window)=app.get_window("main"){
   if let Ok(size)=window.inner_size(){for w in each_content(app){let _=w.set_position(PhysicalPosition::new(0,TOP as i32));let _=w.set_size(PhysicalSize::new(size.width,size.height.saturating_sub(TOP)));}}
  }
 }
+#[cfg(windows)]
+fn attach_adblock(webview:&tauri::Webview,app:tauri::AppHandle,profile_id:String,tab_id:u32){
+ let state=adblock_state(&profile_id);let _=webview.with_webview(move|wv|{let controller=wv.controller();let env=wv.environment();let event_app=app.clone();let event_profile=profile_id.clone();
+  let Ok(core)= (unsafe{controller.CoreWebView2()}) else{return;};unsafe{let _=core.AddWebResourceRequestedFilter(&HSTRING::from("*"),COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);}
+  let handler=WebResourceRequestedEventHandler::create(Box::new(move|_sender,args|{if !state.enabled.load(Ordering::Relaxed){return Ok(());}let Some(args)=args else{return Ok(());};unsafe{let req=args.Request()?;let mut raw=PWSTR::null();req.Uri(&mut raw)?;let url=take_pwstr(raw);if should_block_url(&url){let status=HSTRING::from("No Content");let headers=HSTRING::from("Cache-Control: no-store\r\n");let resp=env.CreateWebResourceResponse(None,204,&status,&headers)?;args.SetResponse(&resp)?;let total=state.blocked.fetch_add(1,Ordering::Relaxed)+1;let _=event_app.emit("veyra-adblock",json!({"profileId":event_profile,"tabId":tab_id,"url":url,"total":total}));log_line(&format!("ADBLOCK profile={} tab={} total={} {}",event_profile,tab_id,total,url));}}Ok(())}));let mut token=0i64;unsafe{let _=core.add_WebResourceRequested(&handler,&mut token);}
+ });
+}
+#[cfg(not(windows))] fn attach_adblock(_webview:&tauri::Webview,_app:tauri::AppHandle,_profile_id:String,_tab_id:u32){}
 #[cfg(windows)]
 fn attach_shortcuts(webview:&tauri::Webview,app:tauri::AppHandle,profile_id:String,tab_id:u32){
  let _=webview.with_webview(move|wv|{let controller=wv.controller();let event_app=app.clone();let event_profile=profile_id.clone();
@@ -41,8 +55,9 @@ fn attach_shortcuts(webview:&tauri::Webview,app:tauri::AppHandle,profile_id:Stri
  });
 }
 #[cfg(not(windows))] fn attach_shortcuts(_webview:&tauri::Webview,_app:tauri::AppHandle,_profile_id:String,_tab_id:u32){}
-fn navigate_impl(app:tauri::AppHandle,profile_id:String,tab_id:u32,url:String,extensions_enabled:bool)->Result<(),String>{
- log_line(&format!("NAVIGATE profile={profile_id} tab={tab_id} {url}"));
+fn navigate_impl(app:tauri::AppHandle,profile_id:String,tab_id:u32,url:String,extensions_enabled:bool,adblock_enabled:bool)->Result<(),String>{
+ adblock_state(&profile_id).enabled.store(adblock_enabled,Ordering::Relaxed);
+ log_line(&format!("NAVIGATE profile={profile_id} tab={tab_id} adblock={adblock_enabled} {url}"));
  let parsed:tauri::Url=url.parse().map_err(|e|format!("URL invalido: {e}"))?;
  if !matches!(parsed.scheme(),"http"|"https"){return Err("Apenas URLs http/https são permitidos".into());}
  hide_all(&app); let web_label=label(&profile_id,tab_id);
@@ -59,10 +74,12 @@ fn navigate_impl(app:tauri::AppHandle,profile_id:String,tab_id:u32,url:String,ex
    DownloadEvent::Requested{url,destination}=>{let _=webview.app_handle().emit("veyra-download",json!({"profileId":download_profile,"tabId":download_id,"url":url.to_string(),"path":destination.to_string_lossy(),"name":destination.file_name().map(|x|x.to_string_lossy().to_string()).unwrap_or_default(),"finished":false}));}
    DownloadEvent::Finished{url,path,success}=>{let _=webview.app_handle().emit("veyra-download",json!({"profileId":download_profile,"tabId":download_id,"url":url.to_string(),"path":path.as_ref().map(|p|p.to_string_lossy().to_string()).unwrap_or_default(),"name":path.as_ref().and_then(|p|p.file_name()).map(|x|x.to_string_lossy().to_string()).unwrap_or_default(),"finished":true,"success":success}));}_=>{}}true});
  let child=window.add_child(builder,PhysicalPosition::new(0,TOP as i32),PhysicalSize::new(size.width,size.height.saturating_sub(TOP))).map_err(|e|e.to_string())?;
- attach_shortcuts(&child,app.clone(),profile_id.clone(),tab_id); let _=child.set_focus();
+ attach_adblock(&child,app.clone(),profile_id.clone(),tab_id);attach_shortcuts(&child,app.clone(),profile_id.clone(),tab_id); let _=child.set_focus();
  log_line(&format!("CHILD profile={profile_id} tab={tab_id} label={web_label} url={:?}",child.url())); Ok(())
 }
-#[tauri::command] async fn navigate(app:tauri::AppHandle,profile_id:String,tab_id:u32,url:String,extensions_enabled:bool)->Result<(),String>{tauri::async_runtime::spawn_blocking(move||navigate_impl(app,profile_id,tab_id,url,extensions_enabled)).await.map_err(|e|e.to_string())?}
+#[tauri::command] async fn navigate(app:tauri::AppHandle,profile_id:String,tab_id:u32,url:String,extensions_enabled:bool,adblock_enabled:bool)->Result<(),String>{tauri::async_runtime::spawn_blocking(move||navigate_impl(app,profile_id,tab_id,url,extensions_enabled,adblock_enabled)).await.map_err(|e|e.to_string())?}
+#[tauri::command] fn set_adblock_enabled(app:tauri::AppHandle,profile_id:String,enabled:bool)->Result<(),String>{let s=adblock_state(&profile_id);s.enabled.store(enabled,Ordering::Relaxed);for w in profile_content(&app,&profile_id){let _=w.reload();}log_line(&format!("ADBLOCK_TOGGLE profile={} enabled={}",profile_id,enabled));Ok(())}
+#[tauri::command] fn adblock_info(profile_id:String)->serde_json::Value{let s=adblock_state(&profile_id);json!({"enabled":s.enabled.load(Ordering::Relaxed),"blocked":s.blocked.load(Ordering::Relaxed),"rules":AD_HOSTS.len()})}
 #[tauri::command] fn switch_tab(app:tauri::AppHandle,profile_id:String,tab_id:u32)->Result<(),String>{hide_all(&app);if let Some(w)=app.get_webview(&label(&profile_id,tab_id)){w.show().map_err(|e|e.to_string())?;let _=w.set_focus();resize_content(&app);}Ok(())}
 #[tauri::command] fn close_tab(app:tauri::AppHandle,profile_id:String,tab_id:u32)->Result<(),String>{if let Some(w)=app.get_webview(&label(&profile_id,tab_id)){w.close().map_err(|e|e.to_string())?;}Ok(())}
 #[tauri::command] fn hide_browser(app:tauri::AppHandle){hide_all(&app);if let Some(shell)=app.get_webview("main"){let _=shell.set_focus();}}
@@ -99,6 +116,6 @@ pub fn run(){
  .plugin(tauri_plugin_updater::Builder::new().build())
  .setup(|app|{let _=std::fs::create_dir_all(data_root());let _=std::fs::write(log_path(),"SETUP start extensions=enabled real-tabs=enabled updater=enabled\n");if let Err(e)=ensure_bundled_extensions(app.handle()){log_line(&format!("EXTENSION_SETUP_ERROR {e}"));}Ok(())})
  .on_window_event(|window,event|if matches!(event,tauri::WindowEvent::Resized(_)){resize_content(&window.app_handle());})
- .invoke_handler(tauri::generate_handler![navigate,switch_tab,close_tab,close_profile,delete_profile_data,hide_browser,browser_back,browser_forward,browser_reload,window_minimize,window_toggle_maximize,window_start_dragging,window_close,clear_browser_data,open_downloads_folder,reveal_download,open_extensions_folder,list_extensions,install_extension_folder,remove_extension,extension_info,app_version,check_for_update,install_update])
+ .invoke_handler(tauri::generate_handler![navigate,set_adblock_enabled,adblock_info,switch_tab,close_tab,close_profile,delete_profile_data,hide_browser,browser_back,browser_forward,browser_reload,window_minimize,window_toggle_maximize,window_start_dragging,window_close,clear_browser_data,open_downloads_folder,reveal_download,open_extensions_folder,list_extensions,install_extension_folder,remove_extension,extension_info,app_version,check_for_update,install_update])
  .run(tauri::generate_context!()).expect("erro ao iniciar Veyra");
 }

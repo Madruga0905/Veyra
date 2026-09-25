@@ -1,26 +1,58 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Veyra",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "identifier": "uk.veyra.browser",
-  "build": { "frontendDist": "../src" },
+  "build": {
+    "frontendDist": "../src"
+  },
   "app": {
     "withGlobalTauri": true,
-    "windows": [{ "label": "main", "title": "Veyra", "url": "index.html?v=0.4.0-r2", "width": 1280, "height": 820, "minWidth": 900, "minHeight": 600, "center": true, "decorations": false, "browserExtensionsEnabled": true }],
-    "security": { "csp": null }
+    "windows": [
+      {
+        "label": "main",
+        "title": "Veyra",
+        "url": "index.html?v=0.4.1",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "decorations": false,
+        "browserExtensionsEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": [
+      "nsis",
+      "msi"
+    ],
     "createUpdaterArtifacts": true,
-    "resources": ["resources/proton-pass"],
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/128x128@2x.png", "icons/icon.icns", "icons/icon.ico"]
+    "resources": [
+      "resources/proton-pass"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
   },
   "plugins": {
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVBRTNFMUI2QkJGQkU5OTQKUldTVTZmdTd0dUhqNm1DTiswaHVNVTlxQzRsQWt0akloWmlURUliTkdWakhRZzlEQ0VZVnY0TUsK",
-      "endpoints": ["https://github.com/Madruga0905/Veyra/releases/latest/download/latest.json"],
-      "windows": { "installMode": "passive" }
+      "endpoints": [
+        "https://github.com/Madruga0905/Veyra/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
